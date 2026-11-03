@@ -76,6 +76,7 @@ export async function createProjectManifest(params: {
       cols: gridConfig.cols,
       totalTiles: gridConfig.rows * gridConfig.cols,
       isAsymmetric: gridConfig.isAsymmetric,
+      chromaAligned: gridConfig.chromaAligned ?? true,
     },
     codecSettings: {
       qualityMode,

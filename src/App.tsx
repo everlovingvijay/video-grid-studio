@@ -21,7 +21,7 @@ import {
   VideoWallConfig,
   SeamMetrics,
 } from './types/video';
-import { computeGridBoundaries, validateGridGeometry } from './services/gridCalculator';
+import { computeGridBoundaries, validateGridGeometry, parseTileFilename } from './services/gridCalculator';
 import { createProjectManifest } from './services/manifestService';
 import { createProjectZip, extractProjectZip } from './services/zipService';
 import { inspectVideoFile, generateSyntheticTestVideo, SyntheticVideoOptions } from './services/browserVideoService';
@@ -106,12 +106,26 @@ export const App: React.FC = () => {
   // Synthetic Test Video Generation State
   const [isGeneratingSample, setIsGeneratingSample] = useState(false);
 
-  // Calculate current tile boundaries based on source resolution and gridConfig
+  // Calculate current tile boundaries based on source resolution and gridConfig, or manifest if present
   const currentTiles: TileBoundary[] = useMemo(() => {
+    if (manifest?.tiles && manifest.tiles.length > 0) {
+      return manifest.tiles.map((t) => ({
+        index: t.index,
+        row: t.row - 1,
+        col: t.col - 1,
+        x0: t.crop.x0,
+        y0: t.crop.y0,
+        x1: t.crop.x1,
+        y1: t.crop.y1,
+        width: t.crop.width,
+        height: t.crop.height,
+        filename: t.filename,
+      }));
+    }
     const width = sourceMetadata?.width || 1920;
     const height = sourceMetadata?.height || 1080;
     return computeGridBoundaries(width, height, gridConfig);
-  }, [sourceMetadata, gridConfig]);
+  }, [manifest, sourceMetadata, gridConfig]);
 
   // Initialize Master Clock Listeners
   useEffect(() => {
@@ -376,6 +390,7 @@ export const App: React.FC = () => {
           cols: extracted.manifest.grid.cols,
           preset: 'custom',
           isAsymmetric: extracted.manifest.grid.isAsymmetric,
+          chromaAligned: extracted.manifest.grid.chromaAligned ?? true,
         });
 
         if (extracted.manifest.source) {
@@ -596,10 +611,59 @@ export const App: React.FC = () => {
         {activeTab === 'reassemble' && (
           <ReassembleSettingsPanel
             onZipUpload={handleZipUpload}
-            onTileFilesUpload={(files) => {
+            onTileFilesUpload={async (files) => {
               const map = new Map(loadedTiles);
               Array.from(files).forEach((f) => map.set(f.name, f));
               setLoadedTiles(map);
+
+              // Create slaved video elements for real-time canvas preview
+              const newVideoElements = new Map(tileVideos);
+              Array.from(files).forEach((f) => {
+                const vid = document.createElement('video');
+                vid.src = URL.createObjectURL(f);
+                vid.muted = true;
+                vid.playsInline = true;
+                vid.preload = 'auto';
+                masterClock.registerVideo(vid);
+                newVideoElements.set(f.name, vid);
+              });
+              setTileVideos(newVideoElements);
+
+              // If sourceMetadata is not known, estimate dimensions from the first tile video
+              if (!sourceMetadata && files.length > 0) {
+                try {
+                  const { metadata: tileMeta } = await inspectVideoFile(files[0]);
+                  if (tileMeta.width && tileMeta.height) {
+                    let maxR = gridConfig.rows;
+                    let maxC = gridConfig.cols;
+                    Array.from(files).forEach((f) => {
+                      const p = parseTileFilename(f.name);
+                      if (p) {
+                        maxR = Math.max(maxR, p.row);
+                        maxC = Math.max(maxC, p.col);
+                      }
+                    });
+                    const estW = tileMeta.width * maxC;
+                    const estH = tileMeta.height * maxR;
+                    setGridConfig((prev) => ({ ...prev, rows: maxR, cols: maxC }));
+                    setSourceMetadata({
+                      name: 'inferred_source.mp4',
+                      size: Array.from(files).reduce((acc, f) => acc + f.size, 0),
+                      duration: tileMeta.duration,
+                      width: estW,
+                      height: estH,
+                      displayAspectRatio: `${estW}:${estH}`,
+                      frameRate: tileMeta.frameRate,
+                      pixelFormat: 'yuv420p',
+                      hasAudio: false,
+                    });
+                    setDuration(tileMeta.duration);
+                    masterClock.setDuration(tileMeta.duration);
+                  }
+                } catch (e) {
+                  console.warn('Could not infer metadata from tile file:', e);
+                }
+              }
             }}
             onAudioUpload={(f) => {
               setMasterAudioBlob(f);

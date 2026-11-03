@@ -83,6 +83,7 @@ export interface ProjectManifest {
     cols: number;
     totalTiles: number;
     isAsymmetric: boolean;
+    chromaAligned?: boolean;
   };
   codecSettings: {
     qualityMode: QualityMode;

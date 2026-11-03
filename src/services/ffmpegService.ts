@@ -13,6 +13,7 @@ class FFmpegService {
   private ffmpeg: FFmpeg | null = null;
   private isLoaded = false;
   private isLoading = false;
+  private recentLogs: string[] = [];
   private abortController: AbortController | null = null;
 
   public isCrossOriginIsolated(): boolean {
@@ -46,8 +47,9 @@ class FFmpegService {
       });
 
       this.ffmpeg.on('log', ({ message }) => {
-        // Helpful for debugging video operations
-        if (message.includes('Error') || message.includes('failed')) {
+        this.recentLogs.push(message);
+        if (this.recentLogs.length > 50) this.recentLogs.shift();
+        if (message.includes('Error') || message.includes('failed') || message.includes('Invalid')) {
           console.warn('[FFmpeg Log]', message);
         }
       });
@@ -264,26 +266,18 @@ class FFmpegService {
 
     onProgress?.(20, 'Constructing seamless multi-tile compositor filter...');
 
-    // Convert each tile to yuv444p (to eliminate chroma subsampling misalignment at seam boundaries),
-    // crop to exact declared tile dimensions (stripping any even-pixel encoder padding),
-    // and stack with explicit :fill=black to eliminate uninitialized YUV (0,0,0) green lines!
-    const filterParts: string[] = [];
-    const streamInputs: string[] = [];
+    // Composite tiles at exact original coordinates using xstack with :fill=black
+    // so any sub-pixel seam or boundary defaults to neutral black instead of YUV (0,0,0) green!
     const layoutPieces: string[] = [];
-
     for (let i = 0; i < sortedTiles.length; i++) {
       const t = sortedTiles[i].tile;
       layoutPieces.push(`${t.x0}_${t.y0}`);
-      filterParts.push(`[${i}:v]crop=${t.width}:${t.height}:0:0,format=yuv444p[v${i}]`);
-      streamInputs.push(`[v${i}]`);
     }
 
     const totalVideoInputs = sortedTiles.length;
+    const streamInputs = Array.from({ length: totalVideoInputs }, (_, i) => `[${i}:v]`).join('');
     const layoutStr = layoutPieces.join('|');
-    filterParts.push(`${streamInputs.join('')}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:fill=black[stacked]`);
-    filterParts.push(`[stacked]format=yuv420p[outv]`);
-
-    const filterComplex = filterParts.join(';');
+    const filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:fill=black[outv]`;
 
     const encoderArgs: string[] = [];
     if (qualityMode === 'fast') {
@@ -302,9 +296,9 @@ class FFmpegService {
     ];
 
     if (hasAudioInput) {
-      // Map audio track from the last input
+      // Map audio track optionally to prevent failure if audio stream has no packets
       const audioIndex = totalVideoInputs;
-      execArgs.push('-map', `${audioIndex}:a`, '-c:a', 'aac', '-b:a', '192k', '-shortest');
+      execArgs.push('-map', `${audioIndex}:a?`, '-c:a', 'aac', '-b:a', '192k', '-shortest');
     }
 
     execArgs.push(
@@ -322,7 +316,8 @@ class FFmpegService {
       for (const fn of tileFileNames) {
         await this.ffmpeg.deleteFile(fn).catch(() => {});
       }
-      throw new Error(`FFmpeg reassembly failed with code ${code}`);
+      const errorMsg = this.recentLogs.slice(-10).join(' ') || `code ${code}`;
+      throw new Error(`FFmpeg reassembly failed: ${errorMsg}`);
     }
 
     onProgress?.(95, 'Reading merged full-frame video...');

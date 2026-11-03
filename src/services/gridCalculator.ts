@@ -21,8 +21,12 @@ export function computeGridBoundaries(
     throw new Error(`Invalid grid rows/cols: ${config.rows}x${config.cols}`);
   }
 
-  const { rows, cols, isAsymmetric, customColumnRatios, customRowRatios } = config;
+  const { rows, cols, isAsymmetric, chromaAligned = true, customColumnRatios, customRowRatios } = config;
   const tiles: TileBoundary[] = [];
+
+  // When source dimensions are even, align cutpoints to even coordinates (multiples of 2)
+  // to avoid chroma subsampling alignment artifacts at tile boundaries in YUV420p!
+  const shouldAlignChroma = chromaAligned && width % 2 === 0 && height % 2 === 0;
 
   // Compute column cutpoints: X[c] for c in 0..cols
   const colCuts: number[] = new Array(cols + 1);
@@ -34,11 +38,13 @@ export function computeGridBoundaries(
     let accum = 0;
     for (let c = 1; c < cols; c++) {
       accum += customColumnRatios[c - 1];
-      colCuts[c] = Math.floor((accum / sum) * width);
+      const rawCut = (accum / sum) * width;
+      colCuts[c] = shouldAlignChroma ? 2 * Math.round(rawCut / 2) : Math.floor(rawCut);
     }
   } else {
     for (let c = 1; c < cols; c++) {
-      colCuts[c] = Math.floor((c * width) / cols);
+      const rawCut = (c * width) / cols;
+      colCuts[c] = shouldAlignChroma ? 2 * Math.round(rawCut / 2) : Math.floor(rawCut);
     }
   }
 
@@ -52,11 +58,13 @@ export function computeGridBoundaries(
     let accum = 0;
     for (let r = 1; r < rows; r++) {
       accum += customRowRatios[r - 1];
-      rowCuts[r] = Math.floor((accum / sum) * height);
+      const rawCut = (accum / sum) * height;
+      rowCuts[r] = shouldAlignChroma ? 2 * Math.round(rawCut / 2) : Math.floor(rawCut);
     }
   } else {
     for (let r = 1; r < rows; r++) {
-      rowCuts[r] = Math.floor((r * height) / rows);
+      const rawCut = (r * height) / rows;
+      rowCuts[r] = shouldAlignChroma ? 2 * Math.round(rawCut / 2) : Math.floor(rawCut);
     }
   }
 

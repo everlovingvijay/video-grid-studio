@@ -127,6 +127,36 @@ describe('gridCalculator - Mathematical & Geometric Precision', () => {
     expect(validation.totalArea).toBe(800000);
   });
 
+  it('portrait 576x1024 3x3 grid with chroma alignment produces even tile dimensions with zero gaps', () => {
+    const tiles = computeGridBoundaries(576, 1024, {
+      rows: 3,
+      cols: 3,
+      preset: '3x3',
+      isAsymmetric: false,
+      chromaAligned: true,
+    });
+
+    expect(tiles).toHaveLength(9);
+
+    // Every tile must have even width and height for YUV420p chroma alignment
+    tiles.forEach((t) => {
+      expect(t.width % 2).toBe(0);
+      expect(t.height % 2).toBe(0);
+      expect(t.x0 % 2).toBe(0);
+      expect(t.y0 % 2).toBe(0);
+    });
+
+    // Heights are 342, 340, 342 -> 342+340+342 = 1024
+    expect(tiles[0].height).toBe(342);
+    expect(tiles[3].height).toBe(340);
+    expect(tiles[6].height).toBe(342);
+
+    const validation = validateGridGeometry(tiles, 576, 1024);
+    expect(validation.valid).toBe(true);
+    expect(validation.totalArea).toBe(576 * 1024);
+    expect(validation.errors).toHaveLength(0);
+  });
+
   it('detects invalid, overlapping, or gapped grids', () => {
     const tiles = computeGridBoundaries(100, 100, {
       rows: 2,

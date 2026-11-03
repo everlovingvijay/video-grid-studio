@@ -162,7 +162,14 @@ class FFmpegService {
     await this.ffmpeg.writeFile(inputName, inputData);
 
     // Build crop filter: crop=w:h:x:y
-    const cropFilter = `crop=${tile.width}:${tile.height}:${tile.x0}:${tile.y0}`;
+    let cropFilter = `crop=${tile.width}:${tile.height}:${tile.x0}:${tile.y0}`;
+    // If tile dimensions are odd, pad to even for H.264 yuv420p encoder compatibility
+    // without dropping any boundary pixels or producing green chroma subsampling artifacts!
+    const targetW = Math.ceil(tile.width / 2) * 2;
+    const targetH = Math.ceil(tile.height / 2) * 2;
+    if (targetW !== tile.width || targetH !== tile.height) {
+      cropFilter += `,pad=${targetW}:${targetH}:0:0:color=black`;
+    }
 
     // Encoder settings based on QualityMode
     const encoderArgs: string[] = [];
@@ -257,20 +264,26 @@ class FFmpegService {
 
     onProgress?.(20, 'Constructing seamless multi-tile compositor filter...');
 
-    // Use xstack or overlay chain to composite tiles at EXACT original coordinates
-    // Using xstack if regular grid, or overlay chain for arbitrary/asymmetric coordinates
-    let filterComplex = '';
+    // Convert each tile to yuv444p (to eliminate chroma subsampling misalignment at seam boundaries),
+    // crop to exact declared tile dimensions (stripping any even-pixel encoder padding),
+    // and stack with explicit :fill=black to eliminate uninitialized YUV (0,0,0) green lines!
+    const filterParts: string[] = [];
+    const streamInputs: string[] = [];
     const layoutPieces: string[] = [];
 
     for (let i = 0; i < sortedTiles.length; i++) {
       const t = sortedTiles[i].tile;
       layoutPieces.push(`${t.x0}_${t.y0}`);
+      filterParts.push(`[${i}:v]crop=${t.width}:${t.height}:0:0,format=yuv444p[v${i}]`);
+      streamInputs.push(`[v${i}]`);
     }
 
     const totalVideoInputs = sortedTiles.length;
-    const streamInputs = Array.from({ length: totalVideoInputs }, (_, i) => `[${i}:v]`).join('');
     const layoutStr = layoutPieces.join('|');
-    filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}[outv]`;
+    filterParts.push(`${streamInputs.join('')}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:fill=black[stacked]`);
+    filterParts.push(`[stacked]format=yuv420p[outv]`);
+
+    const filterComplex = filterParts.join(';');
 
     const encoderArgs: string[] = [];
     if (qualityMode === 'fast') {

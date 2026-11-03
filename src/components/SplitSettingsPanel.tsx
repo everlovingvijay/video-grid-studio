@@ -214,6 +214,27 @@ export const SplitSettingsPanel: React.FC<SplitSettingsPanelProps> = ({
             = <span className="text-studio-cyan font-bold">{gridConfig.rows * gridConfig.cols}</span> tiles
           </div>
         </div>
+
+        {/* Chroma Subsampling Alignment Toggle */}
+        <div className="p-2.5 bg-studio-800/40 rounded-xl border border-studio-700/40 space-y-1">
+          <label className="flex items-center space-x-2 text-xs text-slate-300 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={gridConfig.chromaAligned !== false}
+              onChange={(e) =>
+                onGridConfigChange({
+                  ...gridConfig,
+                  chromaAligned: e.target.checked,
+                })
+              }
+              className="rounded border-studio-700 bg-studio-900 text-studio-accent focus:ring-0"
+            />
+            <span className="font-semibold text-slate-200">Chroma Alignment (2px Even Slices)</span>
+          </label>
+          <p className="text-[10px] text-slate-400 pl-5 leading-tight">
+            Aligns cuts to even macroblock boundaries for YUV420p to eliminate green seam artifacts on non-divisible heights (e.g. 1024, 1080).
+          </p>
+        </div>
       </div>
 
       {/* 3. Precision Quality Mode Selector */}

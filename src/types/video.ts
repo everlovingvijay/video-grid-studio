@@ -23,6 +23,7 @@ export interface GridConfig {
   cols: number;
   preset: GridPreset;
   isAsymmetric: boolean;
+  chromaAligned?: boolean; // Avoid chroma subsampling alignment artifacts at tile boundaries
   customColumnRatios?: number[];
   customRowRatios?: number[];
 }

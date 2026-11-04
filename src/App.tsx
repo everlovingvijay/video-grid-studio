@@ -250,8 +250,19 @@ export const App: React.FC = () => {
         }
       }
 
-      // Step 2: Compute deterministic boundaries
-      const boundaries = computeGridBoundaries(sourceMetadata.width, sourceMetadata.height, gridConfig);
+      // Step 2: Ensure even dimensions to prevent YUV420p chroma subsampling truncation seams
+      const safeWidth = Math.floor(sourceMetadata.width / 2) * 2;
+      const safeHeight = Math.floor(sourceMetadata.height / 2) * 2;
+      const safeMetadata: VideoMetadata = {
+        ...sourceMetadata,
+        width: safeWidth,
+        height: safeHeight,
+      };
+      if (safeWidth !== sourceMetadata.width || safeHeight !== sourceMetadata.height) {
+        setSourceMetadata(safeMetadata);
+      }
+
+      const boundaries = computeGridBoundaries(safeWidth, safeHeight, gridConfig);
       const updatedItems: TileProcessingItem[] = boundaries.map((b) => ({
         tile: b,
         status: 'idle',
@@ -274,8 +285,8 @@ export const App: React.FC = () => {
         const tileBlob = await ffmpegService.splitTile({
           source: sharedInputName,
           tile,
-          sourceWidth: sourceMetadata.width,
-          sourceHeight: sourceMetadata.height,
+          sourceWidth: safeWidth,
+          sourceHeight: safeHeight,
           qualityMode,
           onProgress: (percent, msg) => {
             updatedItems[i].progress = percent;
@@ -403,13 +414,15 @@ export const App: React.FC = () => {
         });
 
         if (extracted.manifest.source) {
+          const zipWidth = Math.floor(extracted.manifest.source.width / 2) * 2;
+          const zipHeight = Math.floor(extracted.manifest.source.height / 2) * 2;
           setSourceMetadata({
             name: extracted.manifest.source.filename,
             size: file.size,
             duration: extracted.manifest.source.duration,
-            width: extracted.manifest.source.width,
-            height: extracted.manifest.source.height,
-            displayAspectRatio: `${extracted.manifest.source.width}:${extracted.manifest.source.height}`,
+            width: zipWidth,
+            height: zipHeight,
+            displayAspectRatio: `${zipWidth}:${zipHeight}`,
             frameRate: extracted.manifest.source.fps,
             pixelFormat: extracted.manifest.source.pixelFormat || 'yuv420p',
             hasAudio: extracted.manifest.source.hasAudio,

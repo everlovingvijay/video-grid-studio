@@ -85,56 +85,61 @@ export const PreviewCanvas: React.FC<PreviewCanvasProps> = ({
 
       ctx.clearRect(0, 0, targetW, targetH);
 
-      // 1. In Reassemble or Split mode:
-      if (mode === 'reassemble' && tileVideos && tileVideos.size > 0) {
-        // Render each tile at its coordinates with split explosion animation
-        ctx.fillStyle = '#0b0f17';
-        ctx.fillRect(0, 0, targetW, targetH);
+      // 1. In Reassemble mode:
+      if (mode === 'reassemble') {
+        if (reconstructedVideoUrl && splitAnimationFactor === 0 && reconVideoRef.current && reconVideoRef.current.readyState >= 2) {
+          // When reassembled and joined, display the seamless full-frame composite video directly
+          ctx.drawImage(reconVideoRef.current, 0, 0, targetW, targetH);
+        } else if (tileVideos && tileVideos.size > 0) {
+          // Render each tile at its coordinates with split explosion animation
+          ctx.fillStyle = '#0b0f17';
+          ctx.fillRect(0, 0, targetW, targetH);
 
-        const explosionDistance = 35 * splitAnimationFactor; // Pixels of separation
-        const centerCol = (gridConfig.cols - 1) / 2;
-        const centerRow = (gridConfig.rows - 1) / 2;
+          const explosionDistance = 35 * splitAnimationFactor; // Pixels of separation
+          const centerCol = (gridConfig.cols - 1) / 2;
+          const centerRow = (gridConfig.rows - 1) / 2;
 
-        for (const tile of tiles) {
-          const video = tileVideos.get(tile.filename);
-          const adj = tileAdjustments?.get(tile.index);
+          for (const tile of tiles) {
+            const video = tileVideos.get(tile.filename);
+            const adj = tileAdjustments?.get(tile.index);
 
-          // Spatial displacement for split/rejoin demonstration
-          const offsetX = (tile.col - centerCol) * explosionDistance;
-          const offsetY = (tile.row - centerRow) * explosionDistance;
+            // Spatial displacement for split/rejoin demonstration
+            const offsetX = (tile.col - centerCol) * explosionDistance;
+            const offsetY = (tile.row - centerRow) * explosionDistance;
 
-          ctx.save();
-          ctx.translate(tile.x0 + offsetX, tile.y0 + offsetY);
+            ctx.save();
+            ctx.translate(tile.x0 + offsetX, tile.y0 + offsetY);
 
-          // Apply tile adjustments if any (brightness, contrast, rotation, flip)
-          if (adj) {
-            let filterStr = '';
-            if (adj.brightness !== 0) filterStr += `brightness(${100 + adj.brightness}%) `;
-            if (adj.contrast !== 0) filterStr += `contrast(${100 + adj.contrast}%) `;
-            if (adj.saturation !== 0) filterStr += `saturate(${100 + adj.saturation}%) `;
-            if (filterStr) ctx.filter = filterStr;
+            // Apply tile adjustments if any (brightness, contrast, rotation, flip)
+            if (adj) {
+              let filterStr = '';
+              if (adj.brightness !== 0) filterStr += `brightness(${100 + adj.brightness}%) `;
+              if (adj.contrast !== 0) filterStr += `contrast(${100 + adj.contrast}%) `;
+              if (adj.saturation !== 0) filterStr += `saturate(${100 + adj.saturation}%) `;
+              if (filterStr) ctx.filter = filterStr;
 
-            if (adj.flipH || adj.flipV) {
-              ctx.scale(adj.flipH ? -1 : 1, adj.flipV ? -1 : 1);
+              if (adj.flipH || adj.flipV) {
+                ctx.scale(adj.flipH ? -1 : 1, adj.flipV ? -1 : 1);
+              }
             }
-          }
 
-          if (video && video.readyState >= 2) {
-            ctx.drawImage(video, 0, 0, tile.width, tile.height);
-          } else {
-            // Placeholder tile block
-            ctx.fillStyle = '#1e293b';
-            ctx.fillRect(0, 0, tile.width, tile.height);
-          }
+            if (video && video.readyState >= 2) {
+              ctx.drawImage(video, 0, 0, tile.width, tile.height);
+            } else {
+              // Placeholder tile block
+              ctx.fillStyle = '#1e293b';
+              ctx.fillRect(0, 0, tile.width, tile.height);
+            }
 
-          // Optional subtle drop shadow when exploded
-          if (splitAnimationFactor > 0.05) {
-            ctx.strokeStyle = '#38bdf8';
-            ctx.lineWidth = 2;
-            ctx.strokeRect(0, 0, tile.width, tile.height);
-          }
+            // Optional subtle drop shadow when exploded
+            if (splitAnimationFactor > 0.05) {
+              ctx.strokeStyle = '#38bdf8';
+              ctx.lineWidth = 2;
+              ctx.strokeRect(0, 0, tile.width, tile.height);
+            }
 
-          ctx.restore();
+            ctx.restore();
+          }
         }
       } else if (mode === 'compare' && compareMode === 'heatmap' && heatmapUrl) {
         // Draw seam heatmap directly
@@ -231,7 +236,7 @@ export const PreviewCanvas: React.FC<PreviewCanvasProps> = ({
         )}
 
         {/* Grid Overlay with deterministic coordinate labels */}
-        {showGridOverlay && mode !== 'compare' && (
+        {showGridOverlay && mode !== 'compare' && (mode !== 'reassemble' || splitAnimationFactor > 0) && (
           <div className="absolute inset-0 pointer-events-none">
             {tiles.map((tile) => {
               const W = sourceMetadata?.width || 1920;

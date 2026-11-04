@@ -355,6 +355,8 @@ class FFmpegService {
       // Composite tiles at exact original coordinates using xstack with :shortest=1:fill=black
       // - shortest=1 ensures xstack cleanly finishes when the video stream ends rather than stalling
       // - fill=black guarantees neutral black for any microscopic boundary rather than uninitialized green
+      // - pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:black guarantees the composite frame dimensions are strictly even (divisible by 2)
+      //   for H.264 (libx264 yuv420p) encoder compliance, preventing "height not divisible by 2" aborts.
       const layoutPieces: string[] = [];
       for (let i = 0; i < sortedTiles.length; i++) {
         const t = sortedTiles[i].tile;
@@ -364,7 +366,7 @@ class FFmpegService {
       const totalVideoInputs = sortedTiles.length;
       const streamInputs = Array.from({ length: totalVideoInputs }, (_, i) => `[${i}:v]`).join('');
       const layoutStr = layoutPieces.join('|');
-      const filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:shortest=1:fill=black[outv]`;
+      const filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:shortest=1:fill=black,pad=ceil(iw/2)*2:ceil(ih/2)*2:0:0:black[outv]`;
 
       const encoderArgs: string[] = [];
       if (qualityMode === 'fast') {

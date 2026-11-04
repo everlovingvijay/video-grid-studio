@@ -22,8 +22,13 @@ export async function inspectVideoFile(file: File | Blob): Promise<{
 
     video.onloadedmetadata = async () => {
       clearTimeout(timeout);
-      const width = video.videoWidth || 1920;
-      const height = video.videoHeight || 1080;
+      const rawWidth = video.videoWidth || 1920;
+      const rawHeight = video.videoHeight || 1080;
+      // In H.264 (yuv420p), macroblock and chroma subsampling require dimensions to be divisible by 2.
+      // If mobile capture or browser metadata reports odd dimensions (e.g. 2560x4551), normalize to even
+      // to ensure all grid partitions and cutpoints stay on clean integer pixel coordinates.
+      const width = Math.floor(rawWidth / 2) * 2;
+      const height = Math.floor(rawHeight / 2) * 2;
       const duration = video.duration || 10;
 
       // Calculate simplified aspect ratio

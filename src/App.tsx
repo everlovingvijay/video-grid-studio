@@ -226,18 +226,22 @@ export const App: React.FC = () => {
     setSplitProgress(0);
     setCurrentTileMessage('Initializing FFmpeg...');
 
+    let sharedInputName: string | null = null;
     try {
       const isLoaded = await ffmpegService.load();
       if (!isLoaded) {
         throw new Error('Could not load FFmpeg WASM core');
       }
 
+      setCurrentTileMessage('Loading video frame buffer into memory...');
+      sharedInputName = await ffmpegService.prepareSourceVideo(sourceFile);
+
       // Step 1: Extract master audio track if video has audio
       let audioBlob: Blob | null = null;
       let audioName = 'master_audio.aac';
       if (sourceMetadata.hasAudio) {
         setCurrentTileMessage('Extracting master audio stream (no tile audio duplication)...');
-        const audioResult = await ffmpegService.extractMasterAudio(sourceFile);
+        const audioResult = await ffmpegService.extractMasterAudio(sharedInputName);
         if (audioResult) {
           audioBlob = audioResult.audioBlob;
           audioName = audioResult.filename;
@@ -268,8 +272,10 @@ export const App: React.FC = () => {
         setTileItems([...updatedItems]);
 
         const tileBlob = await ffmpegService.splitTile({
-          sourceBlob: sourceFile,
+          source: sharedInputName,
           tile,
+          sourceWidth: sourceMetadata.width,
+          sourceHeight: sourceMetadata.height,
           qualityMode,
           onProgress: (percent, msg) => {
             updatedItems[i].progress = percent;
@@ -333,6 +339,9 @@ export const App: React.FC = () => {
     } catch (e) {
       alert(`Split operation failed: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
+      if (sharedInputName) {
+        await ffmpegService.cleanupSourceVideo(sharedInputName).catch(() => {});
+      }
       setIsSplitting(false);
     }
   };

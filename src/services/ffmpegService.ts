@@ -90,11 +90,30 @@ class FFmpegService {
   }
 
   /**
+   * Pre-loads the source video into virtual filesystem once for the whole splitting session.
+   * This avoids re-uploading and allocating large buffers repeatedly across multiple tiles.
+   */
+  public async prepareSourceVideo(sourceBlob: Blob): Promise<string> {
+    if (!this.isLoaded || !this.ffmpeg) {
+      throw new Error('FFmpeg is not initialized');
+    }
+    const inputName = 'shared_source.mp4';
+    const inputData = new Uint8Array(await sourceBlob.arrayBuffer());
+    await this.ffmpeg.writeFile(inputName, inputData);
+    return inputName;
+  }
+
+  public async cleanupSourceVideo(inputName: string = 'shared_source.mp4'): Promise<void> {
+    if (!this.ffmpeg) return;
+    await this.ffmpeg.deleteFile(inputName).catch(() => {});
+  }
+
+  /**
    * Extracts master audio track from source video.
    * Audio is preserved ONCE without duplicating in each tile.
    */
   public async extractMasterAudio(
-    sourceBlob: Blob,
+    source: Blob | string,
     onProgress?: ProgressCallback
   ): Promise<{ audioBlob: Blob; filename: string } | null> {
     if (!this.isLoaded || !this.ffmpeg) {
@@ -102,13 +121,19 @@ class FFmpegService {
     }
 
     onProgress?.(10, 'Reading source audio stream...');
-    const inputName = 'audio_source.mp4';
     const outputName = 'master_audio.aac';
+    let inputName = 'audio_source.mp4';
+    let needsCleanup = true;
+
+    if (typeof source === 'string') {
+      inputName = source;
+      needsCleanup = false;
+    } else {
+      const buffer = new Uint8Array(await source.arrayBuffer());
+      await this.ffmpeg.writeFile(inputName, buffer);
+    }
 
     try {
-      const buffer = new Uint8Array(await sourceBlob.arrayBuffer());
-      await this.ffmpeg.writeFile(inputName, buffer);
-
       onProgress?.(30, 'Extracting master audio track...');
       // Extract audio without video (-vn)
       const exitCode = await this.ffmpeg.exec([
@@ -121,7 +146,7 @@ class FFmpegService {
 
       if (exitCode !== 0) {
         console.warn('Audio extraction exited with non-zero code, source may be silent');
-        await this.ffmpeg.deleteFile(inputName).catch(() => {});
+        if (needsCleanup) await this.ffmpeg.deleteFile(inputName).catch(() => {});
         return null;
       }
 
@@ -129,7 +154,7 @@ class FFmpegService {
       const audioData = (await this.ffmpeg.readFile(outputName)) as Uint8Array;
       const audioBlob = new Blob([new Uint8Array(audioData)], { type: 'audio/aac' });
 
-      await this.ffmpeg.deleteFile(inputName).catch(() => {});
+      if (needsCleanup) await this.ffmpeg.deleteFile(inputName).catch(() => {});
       await this.ffmpeg.deleteFile(outputName).catch(() => {});
 
       return {
@@ -138,6 +163,7 @@ class FFmpegService {
       };
     } catch (e) {
       console.warn('Source video does not contain audio or extraction failed:', e);
+      if (needsCleanup) await this.ffmpeg.deleteFile(inputName).catch(() => {});
       return null;
     }
   }
@@ -146,8 +172,10 @@ class FFmpegService {
    * Spatially crops and exports a single tile from the source video.
    */
   public async splitTile(params: {
-    sourceBlob: Blob;
+    source: Blob | string;
     tile: TileBoundary;
+    sourceWidth?: number;
+    sourceHeight?: number;
     qualityMode: QualityMode;
     onProgress?: ProgressCallback;
   }): Promise<Blob> {
@@ -155,22 +183,31 @@ class FFmpegService {
       throw new Error('FFmpeg is not initialized');
     }
 
-    const { sourceBlob, tile, qualityMode, onProgress } = params;
-    const inputName = `split_in_${tile.index}.mp4`;
-    const outputName = tile.filename;
+    const { source, tile, sourceWidth, sourceHeight, qualityMode, onProgress } = params;
+    let inputName = `split_in_${tile.index}.mp4`;
+    let needsCleanup = true;
 
-    onProgress?.(10, `Loading frame buffer for Tile R${tile.row + 1}:C${tile.col + 1}...`);
-    const inputData = new Uint8Array(await sourceBlob.arrayBuffer());
-    await this.ffmpeg.writeFile(inputName, inputData);
+    if (typeof source === 'string') {
+      inputName = source;
+      needsCleanup = false;
+    } else {
+      onProgress?.(10, `Loading frame buffer for Tile R${tile.row + 1}:C${tile.col + 1}...`);
+      const inputData = new Uint8Array(await source.arrayBuffer());
+      await this.ffmpeg.writeFile(inputName, inputData);
+    }
 
-    // Build crop filter: crop=w:h:x:y
-    let cropFilter = `crop=${tile.width}:${tile.height}:${tile.x0}:${tile.y0}`;
-    // If tile dimensions are odd, pad to even for H.264 yuv420p encoder compatibility
-    // without dropping any boundary pixels or producing green chroma subsampling artifacts!
+    // Build crop filter. If sourceWidth and sourceHeight are provided,
+    // scale to exact source dimensions first to prevent orientation or container size mismatches.
+    let filter = '';
+    if (sourceWidth && sourceHeight && sourceWidth > 0 && sourceHeight > 0) {
+      filter += `scale=${sourceWidth}:${sourceHeight},`;
+    }
+    filter += `crop=${tile.width}:${tile.height}:${tile.x0}:${tile.y0}`;
+
     const targetW = Math.ceil(tile.width / 2) * 2;
     const targetH = Math.ceil(tile.height / 2) * 2;
     if (targetW !== tile.width || targetH !== tile.height) {
-      cropFilter += `,pad=${targetW}:${targetH}:0:0:color=black`;
+      filter += `,pad=${targetW}:${targetH}:0:0:color=black`;
     }
 
     // Encoder settings based on QualityMode
@@ -178,20 +215,22 @@ class FFmpegService {
     if (qualityMode === 'fast') {
       encoderArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '26');
     } else if (qualityMode === 'high') {
-      encoderArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
+      encoderArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '18');
     } else {
       // Lossless mode
-      encoderArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '0');
+      encoderArgs.push('-c:v', 'libx264', '-preset', 'fast', '-crf', '0');
     }
 
     onProgress?.(30, `Encoding ${tile.width}x${tile.height} tile...`);
 
-    // Note: PDF requires "do not duplicate audio in each tile" -> -an (audio none)
+    const outputName = tile.filename;
     const execArgs = [
       '-i', inputName,
-      '-filter:v', cropFilter,
+      '-filter:v', filter,
       ...encoderArgs,
       '-an', // No audio in tiles to prevent duplication
+      '-dn', // No data streams
+      '-sn', // No subtitle streams
       '-pix_fmt', 'yuv420p',
       '-movflags', '+faststart',
       outputName,
@@ -199,8 +238,9 @@ class FFmpegService {
 
     const code = await this.ffmpeg.exec(execArgs);
     if (code !== 0) {
-      await this.ffmpeg.deleteFile(inputName).catch(() => {});
-      throw new Error(`FFmpeg error cropping tile ${tile.filename} (code ${code})`);
+      if (needsCleanup) await this.ffmpeg.deleteFile(inputName).catch(() => {});
+      const errorMsg = this.recentLogs.slice(-10).join(' ') || `code ${code}`;
+      throw new Error(`FFmpeg error cropping tile ${tile.filename}: ${errorMsg}`);
     }
 
     onProgress?.(90, `Finalizing tile ${tile.filename}...`);
@@ -208,7 +248,7 @@ class FFmpegService {
     const tileBlob = new Blob([new Uint8Array(tileData)], { type: 'video/mp4' });
 
     // Cleanup FFmpeg virtual files to prevent memory leak
-    await this.ffmpeg.deleteFile(inputName).catch(() => {});
+    if (needsCleanup) await this.ffmpeg.deleteFile(inputName).catch(() => {});
     await this.ffmpeg.deleteFile(outputName).catch(() => {});
 
     onProgress?.(100, `Tile ${tile.filename} complete`);

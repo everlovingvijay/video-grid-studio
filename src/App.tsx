@@ -472,6 +472,7 @@ export const App: React.FC = () => {
         rows: gridConfig.rows,
         cols: gridConfig.cols,
         qualityMode,
+        duration: duration || sourceMetadata?.duration || 10,
         masterAudioBlob: masterAudioBlob || undefined,
         onProgress: (percent, msg) => {
           setReassembleProgress(percent);

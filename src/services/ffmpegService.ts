@@ -15,6 +15,17 @@ class FFmpegService {
   private isLoading = false;
   private recentLogs: string[] = [];
   private abortController: AbortController | null = null;
+  private currentProgressCallback: ProgressCallback | null = null;
+  private expectedDurationSeconds: number = 0;
+
+  private handleEncodingProgress(ratio: number, details?: string) {
+    if (!this.currentProgressCallback) return;
+    const boundedRatio = Math.max(0, Math.min(1, ratio));
+    // Map compositing phase to 40% -> 94%
+    const mapped = Math.round(40 + boundedRatio * 54);
+    const msg = details || `Compositing video frames (${Math.round(boundedRatio * 100)}%)...`;
+    this.currentProgressCallback(mapped, msg);
+  }
 
   public isCrossOriginIsolated(): boolean {
     return typeof crossOriginIsolated !== 'undefined' && crossOriginIsolated;
@@ -40,8 +51,10 @@ class FFmpegService {
     try {
       this.ffmpeg = new FFmpeg();
 
-      this.ffmpeg.on('progress', ({ progress, time }) => {
-        if (onProgress) {
+      this.ffmpeg.on('progress', ({ progress }) => {
+        if (progress > 0 && progress <= 1) {
+          this.handleEncodingProgress(progress);
+        } else if (onProgress) {
           onProgress(Math.min(100, Math.round(progress * 100)));
         }
       });
@@ -49,6 +62,32 @@ class FFmpegService {
       this.ffmpeg.on('log', ({ message }) => {
         this.recentLogs.push(message);
         if (this.recentLogs.length > 50) this.recentLogs.shift();
+
+        // Parse encoding progress from ffmpeg log: time=HH:MM:SS.ms and frame=NN
+        if (this.currentProgressCallback && message.includes('time=')) {
+          const match = message.match(/time=(\d+):(\d+):([0-9.]+)/);
+          if (match) {
+            const h = parseFloat(match[1]);
+            const m = parseFloat(match[2]);
+            const s = parseFloat(match[3]);
+            const currentSec = h * 3600 + m * 60 + s;
+            const speedMatch = message.match(/speed=\s*([0-9.]+x)/);
+            const speed = speedMatch ? speedMatch[1] : '';
+            const frameMatch = message.match(/frame=\s*(\d+)/);
+            const frame = frameMatch ? frameMatch[1] : '';
+
+            if (this.expectedDurationSeconds > 0) {
+              const ratio = Math.min(1, currentSec / this.expectedDurationSeconds);
+              const speedText = speed ? ` • ${speed}` : '';
+              const frameText = frame ? `Frame ${frame}` : `${currentSec.toFixed(1)}s`;
+              this.handleEncodingProgress(
+                ratio,
+                `Compositing: ${frameText} / ${this.expectedDurationSeconds.toFixed(1)}s (${Math.round(ratio * 100)}%${speedText})`
+              );
+            }
+          }
+        }
+
         if (message.includes('Error') || message.includes('failed') || message.includes('Invalid')) {
           console.warn('[FFmpeg Log]', message);
         }
@@ -265,6 +304,7 @@ class FFmpegService {
     rows: number;
     cols: number;
     qualityMode: QualityMode;
+    duration?: number;
     masterAudioBlob?: Blob;
     onProgress?: ProgressCallback;
   }): Promise<Blob> {
@@ -272,106 +312,114 @@ class FFmpegService {
       throw new Error('FFmpeg is not initialized');
     }
 
-    const { tiles, totalWidth, totalHeight, rows, cols, qualityMode, masterAudioBlob, onProgress } = params;
+    const { tiles, totalWidth, totalHeight, rows, cols, qualityMode, duration, masterAudioBlob, onProgress } = params;
 
-    onProgress?.(5, 'Preparing tile buffers for reassembly...');
+    this.currentProgressCallback = onProgress || null;
+    this.expectedDurationSeconds = duration && duration > 0 ? duration : 10;
 
-    const inputArgs: string[] = [];
     const tileFileNames: string[] = [];
-
-    // Sort tiles by row then col
-    const sortedTiles = [...tiles].sort((a, b) => {
-      if (a.tile.row !== b.tile.row) return a.tile.row - b.tile.row;
-      return a.tile.col - b.tile.col;
-    });
-
-    for (let i = 0; i < sortedTiles.length; i++) {
-      const item = sortedTiles[i];
-      const fn = `reassemble_tile_${i}.mp4`;
-      tileFileNames.push(fn);
-      const data = new Uint8Array(await item.blob.arrayBuffer());
-      await this.ffmpeg.writeFile(fn, data);
-      inputArgs.push('-i', fn);
-    }
-
-    let hasAudioInput = false;
-    if (masterAudioBlob) {
-      const audioFn = 'reassemble_audio.aac';
-      const audioData = new Uint8Array(await masterAudioBlob.arrayBuffer());
-      await this.ffmpeg.writeFile(audioFn, audioData);
-      inputArgs.push('-i', audioFn);
-      tileFileNames.push(audioFn);
-      hasAudioInput = true;
-    }
-
-    onProgress?.(20, 'Constructing seamless multi-tile compositor filter...');
-
-    // Composite tiles at exact original coordinates using xstack with :fill=black
-    // so any sub-pixel seam or boundary defaults to neutral black instead of YUV (0,0,0) green!
-    const layoutPieces: string[] = [];
-    for (let i = 0; i < sortedTiles.length; i++) {
-      const t = sortedTiles[i].tile;
-      layoutPieces.push(`${t.x0}_${t.y0}`);
-    }
-
-    const totalVideoInputs = sortedTiles.length;
-    const streamInputs = Array.from({ length: totalVideoInputs }, (_, i) => `[${i}:v]`).join('');
-    const layoutStr = layoutPieces.join('|');
-    const filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:fill=black[outv]`;
-
-    const encoderArgs: string[] = [];
-    if (qualityMode === 'fast') {
-      encoderArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24');
-    } else if (qualityMode === 'high') {
-      encoderArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '18');
-    } else {
-      encoderArgs.push('-c:v', 'libx264', '-preset', 'medium', '-crf', '0');
-    }
-
     const outputName = 'reconstructed_video.mp4';
-    const execArgs: string[] = [
-      ...inputArgs,
-      '-filter_complex', filterComplex,
-      '-map', '[outv]',
-    ];
 
-    if (hasAudioInput) {
-      // Map audio track optionally to prevent failure if audio stream has no packets
-      const audioIndex = totalVideoInputs;
-      execArgs.push('-map', `${audioIndex}:a?`, '-c:a', 'aac', '-b:a', '192k', '-shortest');
-    }
+    try {
+      onProgress?.(5, 'Preparing tile buffers for reassembly...');
 
-    execArgs.push(
-      ...encoderArgs,
-      '-pix_fmt', 'yuv420p',
-      '-movflags', '+faststart',
-      outputName
-    );
+      const inputArgs: string[] = [];
 
-    onProgress?.(40, `Compositing ${sortedTiles.length} tiles to ${totalWidth}x${totalHeight}...`);
+      // Sort tiles by row then col
+      const sortedTiles = [...tiles].sort((a, b) => {
+        if (a.tile.row !== b.tile.row) return a.tile.row - b.tile.row;
+        return a.tile.col - b.tile.col;
+      });
 
-    const code = await this.ffmpeg.exec(execArgs);
-    if (code !== 0) {
-      // Cleanup files
+      for (let i = 0; i < sortedTiles.length; i++) {
+        const item = sortedTiles[i];
+        const fn = `reassemble_tile_${i}.mp4`;
+        tileFileNames.push(fn);
+        const data = new Uint8Array(await item.blob.arrayBuffer());
+        await this.ffmpeg.writeFile(fn, data);
+        inputArgs.push('-i', fn);
+      }
+
+      let hasAudioInput = false;
+      if (masterAudioBlob) {
+        const audioFn = 'reassemble_audio.aac';
+        const audioData = new Uint8Array(await masterAudioBlob.arrayBuffer());
+        await this.ffmpeg.writeFile(audioFn, audioData);
+        inputArgs.push('-i', audioFn);
+        tileFileNames.push(audioFn);
+        hasAudioInput = true;
+      }
+
+      onProgress?.(25, 'Constructing seamless multi-tile compositor filter...');
+
+      // Composite tiles at exact original coordinates using xstack with :shortest=1:fill=black
+      // - shortest=1 ensures xstack cleanly finishes when the video stream ends rather than stalling
+      // - fill=black guarantees neutral black for any microscopic boundary rather than uninitialized green
+      const layoutPieces: string[] = [];
+      for (let i = 0; i < sortedTiles.length; i++) {
+        const t = sortedTiles[i].tile;
+        layoutPieces.push(`${t.x0}_${t.y0}`);
+      }
+
+      const totalVideoInputs = sortedTiles.length;
+      const streamInputs = Array.from({ length: totalVideoInputs }, (_, i) => `[${i}:v]`).join('');
+      const layoutStr = layoutPieces.join('|');
+      const filterComplex = `${streamInputs}xstack=inputs=${totalVideoInputs}:layout=${layoutStr}:shortest=1:fill=black[outv]`;
+
+      const encoderArgs: string[] = [];
+      if (qualityMode === 'fast') {
+        encoderArgs.push('-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24');
+      } else if (qualityMode === 'high') {
+        encoderArgs.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '18');
+      } else {
+        encoderArgs.push('-c:v', 'libx264', '-preset', 'veryfast', '-crf', '0');
+      }
+
+      const execArgs: string[] = [
+        ...inputArgs,
+        '-filter_complex', filterComplex,
+        '-map', '[outv]',
+      ];
+
+      if (hasAudioInput) {
+        // Map audio track optionally to prevent failure if audio stream has no packets
+        const audioIndex = totalVideoInputs;
+        execArgs.push('-map', `${audioIndex}:a?`, '-c:a', 'aac', '-b:a', '192k', '-shortest');
+      }
+
+      execArgs.push(
+        ...encoderArgs,
+        '-dn', // Discard data streams
+        '-sn', // Discard subtitle streams
+        '-pix_fmt', 'yuv420p',
+        '-movflags', '+faststart',
+        outputName
+      );
+
+      onProgress?.(40, `Compositing ${sortedTiles.length} tiles to ${totalWidth}x${totalHeight}...`);
+
+      const code = await this.ffmpeg.exec(execArgs);
+      if (code !== 0) {
+        const errorMsg = this.recentLogs.slice(-10).join(' ') || `code ${code}`;
+        throw new Error(`FFmpeg reassembly failed: ${errorMsg}`);
+      }
+
+      onProgress?.(95, 'Reading merged full-frame video...');
+      const resultData = (await this.ffmpeg.readFile(outputName)) as Uint8Array;
+      const resultBlob = new Blob([new Uint8Array(resultData)], { type: 'video/mp4' });
+
+      onProgress?.(100, 'Reassembly complete');
+      return resultBlob;
+    } finally {
+      this.currentProgressCallback = null;
+      this.expectedDurationSeconds = 0;
+
+      // Cleanup virtual files
       for (const fn of tileFileNames) {
         await this.ffmpeg.deleteFile(fn).catch(() => {});
       }
-      const errorMsg = this.recentLogs.slice(-10).join(' ') || `code ${code}`;
-      throw new Error(`FFmpeg reassembly failed: ${errorMsg}`);
+      await this.ffmpeg.deleteFile(outputName).catch(() => {});
     }
-
-    onProgress?.(95, 'Reading merged full-frame video...');
-    const resultData = (await this.ffmpeg.readFile(outputName)) as Uint8Array;
-    const resultBlob = new Blob([new Uint8Array(resultData)], { type: 'video/mp4' });
-
-    // Cleanup
-    for (const fn of tileFileNames) {
-      await this.ffmpeg.deleteFile(fn).catch(() => {});
-    }
-    await this.ffmpeg.deleteFile(outputName).catch(() => {});
-
-    onProgress?.(100, 'Reassembly complete');
-    return resultBlob;
   }
 }
 
